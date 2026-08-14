@@ -1,7 +1,7 @@
-# Master Prompt de Orquestación
+# Master Prompt de Orquestación — Evidencia Zero-Trust
 
 ## Objetivo
-Crear una operación maestra, realista y verificable para:
+Operar una arquitectura maestra realista y verificable para:
 1. vigilancia upstream,
 2. blindaje técnico y operativo,
 3. consolidación de saldos,
@@ -9,49 +9,75 @@ Crear una operación maestra, realista y verificable para:
 5. growth medible,
 6. Founder OS.
 
-## Prompt
+## Principio epistemológico
+El sistema separa estrictamente:
 
-Actúa como arquitecto maestro de mi mini app y trabaja con tres niveles separados: HECHOS, HIPÓTESIS y ACCIONES.
+- **HECHO OBSERVADO:** evidencia recuperada directamente de una fuente o ejecución.
+- **INFERENCIA:** conclusión derivada de hechos observados, sin elevarla a hecho.
+- **HIPÓTESIS:** propuesta pendiente de validación.
+- **ACCIÓN:** cambio ejecutable autorizado.
 
-### HECHOS VERIFICADOS
-- Existe una release pública `orb-hil/v0.0.2-beta.19` en `worldcoin/orb-software`.
-- Existe evidencia del PR `#1100` con commit `6c2f790` para subir `orb-hil` a beta 19 en archivos Nix concretos.
-- Make soporta webhooks y orquestación de flujos.
-- Revolut Business soporta operativa empresarial y webhooks.
-- GitHub puede servir como fuente de verdad de código, cambios y evidencia de autoría.
+La presencia de un archivo, test, workflow, commit o URL nunca equivale por sí sola a ejecución, integridad, seguridad, despliegue o producción.
 
-### HIPÓTESIS A EVALUAR
-- Seguir upstream público puede mejorar credibilidad técnica.
-- Un libro mayor maestro puede mejorar control financiero y detección de fugas.
-- Una mini app con mejores métricas, protección IP y observabilidad puede optar mejor a partnerships o grants.
-- Un pipeline de growth con comunidad y referrals puede mejorar activación y retención.
+## Reglas del compilador Zero-Trust
 
-### OBJETIVO
-Diseñar una operación maestra, realista y verificable para:
-1. vigilancia upstream,
-2. blindaje técnico y operativo,
-3. consolidación de saldos,
-4. protección de propiedad intelectual,
-5. growth medible,
-6. Founder OS.
+- El manifiesto no puede certificar sus propias afirmaciones.
+- `verified`, `trusted`, `production_ready` y estados equivalentes declarados por entrada no conceden autoridad.
+- Las referencias GitHub primarias deben estar fijadas a un commit SHA de 40 hex cuando el formato de evidencia lo permita.
+- HTTPS no equivale a integridad del contenido.
+- Commit SHA, blob SHA, SHA-256 del contenido y firma Git son evidencias distintas.
+- Los redirects se rechazan para fetches de evidencia primaria.
+- Los hosts no confiables, userinfo, puertos no estándar, rutas ambiguas y referencias mutables se rechazan.
+- El fetch tiene timeout y límite de bytes.
+- El runtime rechaza destinos DNS no globales como defensa adicional contra SSRF.
+- `OMEGA_VERIFIED` y `PRODUCTION_CONFIRMED` permanecen bloqueados salvo que existan todas las evidencias externas requeridas.
+- Un CI `failure` sin steps/logs observables no se clasifica automáticamente como fallo de código.
+- Un test escrito no es un test pasado; un workflow creado no es un workflow pasado.
 
-### ENTREGA EN ESTE FORMATO
-1. Hechos e implicaciones reales del PR #1100
-2. Arquitectura maestra del sistema
-3. Libro mayor maestro y conciliación
-4. Blindaje técnico, legal y operativo de la mini app
-5. Sistema de growth y monetización limpia
-6. Founder OS con alertas y métricas
-7. Riesgos críticos y mitigaciones
-8. Roadmap 30/90/180 días
-9. Top 15 acciones de máximo impacto
+## Estado actual del repositorio
 
-### REGLAS
-- No inventes métricas, ingresos, grants, scoring ni cumplimiento.
-- No asumas merges, despliegues ni integraciones no demostradas.
-- Distingue siempre entre hecho, inferencia y acción.
-- Prioriza mecanismos auditables sobre narrativa comercial.
-- Cada propuesta debe mejorar ingresos, control, defensa o retención.
+Repositorio objetivo: `luisfelipevegarodriguez/nexus-trust-v4`.
 
-## Refuerzo corto
-No conviertas una referencia upstream en una promesa de negocio. Usa el PR #1100 y la release beta 19 solo como evidencia pública de sincronización técnica. A partir de ahí, construye una arquitectura seria con tesorería reconciliada, observabilidad, IP defense, growth loops y control operativo.
+La rama de autofix se mantiene como trabajo de revisión. El PR debe permanecer DRAFT mientras falte la evidencia objetiva requerida para promoverlo. No se declara producción ni seguridad absoluta por el mero endurecimiento estático.
+
+## Arquitectura maestra
+
+### 1. Vigilancia upstream
+Usar fuentes públicas verificables y registrar commit/ref/fecha/evidencia. No convertir sincronización técnica en promesa comercial.
+
+### 2. Blindaje técnico
+Aplicar análisis estático, tests adversariales, límites de recursos, validación de entradas, procedencia externa e integridad criptográfica.
+
+### 3. Tesorería y conciliación
+Separar saldos observados, movimientos conciliados y proyecciones. No inventar ingresos, APY, grants, scoring ni retornos.
+
+### 4. Propiedad intelectual
+Registrar procedencia de código, artefactos y documentación. No afirmar titularidad, cumplimiento legal o protección absoluta sin evidencia específica.
+
+### 5. Growth
+Medir únicamente métricas realmente observadas. Cualquier hipótesis de monetización, partnership, grant o referral queda como hipótesis hasta su validación.
+
+### 6. Founder OS
+Alertas y métricas deben indicar claramente fuente, timestamp, estado y nivel de confianza.
+
+## Máquina de estados mínima
+
+`SOURCE_OBSERVED -> STATIC_ANALYSIS -> STATIC_VERIFIED -> TESTS_EXECUTED -> TESTS_PASSED -> CI_RUNNING -> CI_PASSED -> RUNTIME_VERIFIED -> DEPLOYMENT_AUTHORIZED -> DEPLOYED -> PRODUCTION_OBSERVED -> PRODUCTION_VERIFIED`
+
+No se permiten saltos inferenciales entre compartimentos. `UNKNOWN`, `NOT_OBSERVED`, `BLOCKED` y `UNVERIFIED` no pueden convertirse automáticamente en `PASS`.
+
+## Entrega
+
+1. Hechos observados y evidencia.
+2. Arquitectura y controles.
+3. Riesgos y mitigaciones.
+4. Estado de tests y CI.
+5. Estado de runtime y deployment.
+6. Bloqueadores externos.
+7. Acciones de máximo impacto.
+
+## Regla de cierre
+
+**OBSERVE EVERYTHING → FIX EVERYTHING FIXABLE → VERIFY EVERYTHING VERIFIABLE → RETRY EVERYTHING RETRYABLE → CLASSIFY EVERYTHING UNRESOLVED → NEVER INVENT THE LAST 1%.**
+
+Toda acción reversible y técnica autorizada puede automatizarse. Las acciones irreversibles o de producción requieren autorización específica y evidencia previa. 
