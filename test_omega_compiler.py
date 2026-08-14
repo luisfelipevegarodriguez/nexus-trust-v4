@@ -1,4 +1,5 @@
 import hashlib
+import socket
 import unittest
 from unittest.mock import patch
 
@@ -29,6 +30,10 @@ class FakeResponse:
 class CompilerTests(unittest.TestCase):
     def setUp(self):
         self.compiler = ZeroTrustEvidenceCompiler()
+        # Network content tests are deterministic: DNS policy is tested separately.
+        self.dns_patch = patch.object(self.compiler, "_assert_public_dns")
+        self.dns_patch.start()
+        self.addCleanup(self.dns_patch.stop)
 
     def assert_rejected(self, url, digest=GOOD_DIGEST):
         with self.assertRaises(EvidenceError):
@@ -142,9 +147,22 @@ class CompilerTests(unittest.TestCase):
         self.assertTrue(result.verified)
         self.assertTrue(result.immutable_reference)
 
-    def test_mcp_hosts_require_an_immutable_reference(self):
+    def test_mcp_hosts_are_not_primary_evidence_without_immutable_reference(self):
         for host in ("https://modelcontextprotocol.io/evidence", "https://registry.modelcontextprotocol.io/evidence"):
             self.assert_rejected(host)
+
+    def test_dns_private_address_is_rejected(self):
+        private = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))]
+        with patch("omega_compiler.socket.getaddrinfo", return_value=private):
+            with self.assertRaises(EvidenceError) as ctx:
+                self.compiler._assert_public_dns("github.com")
+        self.assertEqual(str(ctx.exception), "DNS_NON_GLOBAL_ADDRESS_REJECTED")
+
+    def test_dns_resolution_failure_is_rejected(self):
+        with patch("omega_compiler.socket.getaddrinfo", side_effect=OSError("resolver failure")):
+            with self.assertRaises(EvidenceError) as ctx:
+                self.compiler._assert_public_dns("github.com")
+        self.assertEqual(str(ctx.exception), "DNS_RESOLUTION_FAILED")
 
     def test_missing_manifest_is_rejected(self):
         with self.assertRaises(EvidenceError):
@@ -205,8 +223,9 @@ class CompilerTests(unittest.TestCase):
         self.assertIsNotNone(self.compiler.tls)
 
     def test_invalid_timeout_is_rejected(self):
-        with self.assertRaises(ValueError):
-            ZeroTrustEvidenceCompiler(timeout=0)
+        for value in (0, -1, True):
+            with self.assertRaises(ValueError):
+                ZeroTrustEvidenceCompiler(timeout=value)
 
     def test_scheme_normalization_does_not_bypass_host_or_sha_checks(self):
         url = GOOD_URL.replace("https://", "HTTPS://")
