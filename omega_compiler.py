@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import hmac
+import http.client
 import ipaddress
 import json
 import re
@@ -39,10 +40,37 @@ class _NoRedirectHandler(HTTPRedirectHandler):
         raise EvidenceError("REDIRECT_FORBIDDEN")
 
 
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection that dials a previously validated IP while preserving TLS SNI."""
+
+    def __init__(self, host: str, pinned_ip: str, **kwargs: Any):
+        self._pinned_ip = pinned_ip
+        super().__init__(host, **kwargs)
+
+    def connect(self) -> None:
+        self.sock = socket.create_connection(
+            (self._pinned_ip, self.port), self.timeout, self.source_address
+        )
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
+
+
+class _PinnedHTTPSHandler(HTTPSHandler):
+    def __init__(self, pinned_ip: str, context: ssl.SSLContext):
+        super().__init__(context=context)
+        self._pinned_ip = pinned_ip
+
+    def https_open(self, req):
+        pinned_ip = self._pinned_ip
+
+        class PinnedConnection(_PinnedHTTPSConnection):
+            def __init__(self, host: str, **kwargs: Any):
+                super().__init__(host, pinned_ip=pinned_ip, **kwargs)
+
+        return self.do_open(PinnedConnection, req, context=self._context)
+
+
 class ZeroTrustEvidenceCompiler:
-    VERSION = "4.5.1-zero-trust"
-    # Only sources whose URL can itself carry an immutable Git commit reference
-    # are accepted as primary evidence by this compiler.
+    VERSION = "4.6.0-zero-trust"
     ALLOWED_PRIMARY_HOSTS = frozenset({
         "github.com",
         "raw.githubusercontent.com",
@@ -60,15 +88,10 @@ class ZeroTrustEvidenceCompiler:
             raise ValueError("TIMEOUT_MUST_BE_POSITIVE")
         self.timeout = float(timeout)
         self.tls = ssl.create_default_context()
-        self.opener = build_opener(
-            ProxyHandler({}),
-            _NoRedirectHandler(),
-            HTTPSHandler(context=self.tls),
-        )
 
     @classmethod
     def _parse_and_validate_url(cls, url: str) -> Tuple[str, bool]:
-        """Parse once with urlsplit and reject ambiguous/mutable references."""
+        """Parse once with urlsplit and reject ambiguous or mutable references."""
         if not isinstance(url, str) or not url:
             raise EvidenceError("SOURCE_URL_REQUIRED")
         if len(url) > cls.MAX_URL_LENGTH:
@@ -82,7 +105,7 @@ class ZeroTrustEvidenceCompiler:
         except ValueError as exc:
             raise EvidenceError("URL_PARSE_ERROR") from exc
 
-        if parsed.scheme != "https":
+        if parsed.scheme.lower() != "https":
             raise EvidenceError("SOURCE_URL_MUST_BE_HTTPS")
         if parsed.username is not None or parsed.password is not None:
             raise EvidenceError("URL_USERINFO_FORBIDDEN")
@@ -113,7 +136,6 @@ class ZeroTrustEvidenceCompiler:
         if any("%" in part for part in parts):
             raise EvidenceError("PERCENT_ENCODED_PATH_REJECTED")
 
-        immutable = False
         if host == "github.com":
             immutable = (
                 len(parts) >= 5
@@ -122,7 +144,7 @@ class ZeroTrustEvidenceCompiler:
                 and parts[2] == "blob"
                 and bool(cls.GITHUB_SHA_RE.fullmatch(parts[3]))
             )
-        elif host == "raw.githubusercontent.com":
+        else:
             immutable = (
                 len(parts) >= 4
                 and cls.SAFE_SEGMENT_RE.fullmatch(parts[0]) is not None
@@ -133,8 +155,8 @@ class ZeroTrustEvidenceCompiler:
         return host, immutable
 
     @staticmethod
-    def _assert_public_dns(host: str) -> None:
-        """Reject obvious SSRF destinations before the HTTP connection."""
+    def _assert_public_dns(host: str) -> str:
+        """Resolve once, reject non-global addresses, and return the pinned address."""
         try:
             infos = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
         except OSError as exc:
@@ -143,6 +165,7 @@ class ZeroTrustEvidenceCompiler:
         if not infos:
             raise EvidenceError("DNS_NO_ADDRESSES")
 
+        global_addresses: List[str] = []
         for info in infos:
             address = info[4][0]
             try:
@@ -150,7 +173,12 @@ class ZeroTrustEvidenceCompiler:
             except ValueError as exc:
                 raise EvidenceError("DNS_INVALID_ADDRESS") from exc
             if not parsed_ip.is_global:
-                raise EvidenceError("DNS_NON_GLOBAL_ADDRESS_REJECTED")
+                continue
+            global_addresses.append(address)
+
+        if not global_addresses:
+            raise EvidenceError("DNS_NON_GLOBAL_ADDRESS_REJECTED")
+        return global_addresses[0]
 
     def fetch_primary(self, url: str, expected_sha256: str) -> Observation:
         host, immutable_reference = self._parse_and_validate_url(url)
@@ -159,7 +187,14 @@ class ZeroTrustEvidenceCompiler:
         if not immutable_reference:
             raise EvidenceError("IMMUTABLE_SOURCE_REFERENCE_REQUIRED")
 
-        self._assert_public_dns(host)
+        # The resolved IP is pinned into the connection so a second DNS lookup
+        # cannot redirect the request to a different address between validation and connect.
+        pinned_ip = self._assert_public_dns(host)
+        opener = build_opener(
+            ProxyHandler({}),
+            _NoRedirectHandler(),
+            _PinnedHTTPSHandler(pinned_ip, self.tls),
+        )
         fetched_at_ns = time.time_ns()
         request = Request(
             url,
@@ -170,7 +205,7 @@ class ZeroTrustEvidenceCompiler:
             },
         )
         try:
-            with self.opener.open(request, timeout=self.timeout) as response:
+            with opener.open(request, timeout=self.timeout) as response:
                 status = int(response.status)
                 content_length = response.headers.get("Content-Length")
                 if content_length is not None:
@@ -188,7 +223,7 @@ class ZeroTrustEvidenceCompiler:
                             expected_sha256=expected_sha256,
                             bytes=declared_length,
                             fetched_at_ns=fetched_at_ns,
-                            primary_host=host in self.ALLOWED_PRIMARY_HOSTS,
+                            primary_host=True,
                             immutable_reference=immutable_reference,
                             hash_match=False,
                             verified=False,
@@ -205,7 +240,7 @@ class ZeroTrustEvidenceCompiler:
                 expected_sha256=expected_sha256,
                 bytes=0,
                 fetched_at_ns=fetched_at_ns,
-                primary_host=host in self.ALLOWED_PRIMARY_HOSTS,
+                primary_host=True,
                 immutable_reference=immutable_reference,
                 hash_match=False,
                 verified=False,
@@ -220,7 +255,7 @@ class ZeroTrustEvidenceCompiler:
                 expected_sha256=expected_sha256,
                 bytes=len(data),
                 fetched_at_ns=fetched_at_ns,
-                primary_host=host in self.ALLOWED_PRIMARY_HOSTS,
+                primary_host=True,
                 immutable_reference=immutable_reference,
                 hash_match=False,
                 verified=False,
@@ -229,12 +264,7 @@ class ZeroTrustEvidenceCompiler:
 
         digest = hashlib.sha256(data).hexdigest()
         hash_match = hmac.compare_digest(digest.lower(), expected_sha256.lower())
-        verified = (
-            200 <= status < 300
-            and host in self.ALLOWED_PRIMARY_HOSTS
-            and immutable_reference
-            and hash_match
-        )
+        verified = 200 <= status < 300 and hash_match
         return Observation(
             url=url,
             http_status=status,
@@ -242,7 +272,7 @@ class ZeroTrustEvidenceCompiler:
             expected_sha256=expected_sha256,
             bytes=len(data),
             fetched_at_ns=fetched_at_ns,
-            primary_host=host in self.ALLOWED_PRIMARY_HOSTS,
+            primary_host=True,
             immutable_reference=immutable_reference,
             hash_match=hash_match,
             verified=verified,
@@ -306,13 +336,15 @@ class ZeroTrustEvidenceCompiler:
                 "total_claims": len(claims),
             },
             "gate_states": {
-                "TECHNICAL_STATUS": "STATIC_VERIFIED" if observations else "NOT_EXECUTED",
-                "EXECUTION_STATUS": "EXECUTED_IN_SESSION",
+                "TECHNICAL_STATUS": "STATIC_INPUT_VALIDATED",
+                "EXECUTION_STATUS": "NETWORK_EVIDENCE_FETCHED",
                 "VALUE_STATUS": "UNKNOWN",
                 "ECONOMIC_STATUS": "UNKNOWN",
                 "ADVANTAGE_STATUS": "UNVERIFIED",
             },
-            "final_classification": "CANDIDATE" if density >= 0.90 else "RESEARCH",
+            # Evidence density is not a global deployment verdict. Promotion remains
+            # outside this compiler until independent CI/runtime/deployment evidence exists.
+            "final_classification": "RESEARCH",
             "omega_verified": False,
             "production_confirmed": False,
         }
