@@ -13,9 +13,10 @@ GOOD_DIGEST = hashlib.sha256(b"primary evidence").hexdigest()
 
 
 class FakeResponse:
-    def __init__(self, body=b"primary evidence", status=200):
+    def __init__(self, body=b"primary evidence", status=200, headers=None):
         self.body = body
         self.status = status
+        self.headers = headers or {}
 
     def __enter__(self):
         return self
@@ -134,6 +135,21 @@ class CompilerTests(unittest.TestCase):
             result = self.compiler.fetch_primary(GOOD_URL, GOOD_DIGEST)
         self.assertFalse(result.verified)
         self.assertEqual(result.reason, "SOURCE_TOO_LARGE")
+
+    def test_declared_content_length_is_bounded_before_read(self):
+        headers = {"Content-Length": str(self.compiler.MAX_BYTES + 1)}
+        with patch.object(self.compiler.opener, "open", return_value=FakeResponse(headers=headers)) as opened:
+            result = self.compiler.fetch_primary(GOOD_URL, GOOD_DIGEST)
+        self.assertFalse(result.verified)
+        self.assertEqual(result.reason, "SOURCE_TOO_LARGE")
+        opened.assert_called_once()
+
+    def test_invalid_content_length_is_fail_closed(self):
+        headers = {"Content-Length": "not-an-integer"}
+        with patch.object(self.compiler.opener, "open", return_value=FakeResponse(headers=headers)):
+            with self.assertRaises(EvidenceError) as ctx:
+                self.compiler.fetch_primary(GOOD_URL, GOOD_DIGEST)
+        self.assertEqual(str(ctx.exception), "INVALID_CONTENT_LENGTH")
 
     def test_timeout_or_network_error_is_not_verified(self):
         with patch.object(self.compiler.opener, "open", side_effect=TimeoutError("timeout")):
