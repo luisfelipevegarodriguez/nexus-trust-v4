@@ -102,7 +102,7 @@ class CompilerTests(unittest.TestCase):
         self.assert_rejected(GOOD_URL.replace("servers/", "servers//"))
 
     def test_backslash_path_is_rejected(self):
-        self.assert_rejected(GOOD_URL.replace("servers/", "servers\\"))
+        self.assert_rejected(GOOD_URL.replace("servers/", "servers" + "\\"))
 
     def test_dot_segments_are_rejected(self):
         self.assert_rejected(GOOD_URL.replace("servers/", "servers/../servers/"))
