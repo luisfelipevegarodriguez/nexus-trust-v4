@@ -23,13 +23,16 @@ La presencia de un archivo, test, workflow, commit o URL nunca equivale por sí 
 
 - El manifiesto no puede certificar sus propias afirmaciones.
 - `verified`, `trusted`, `production_ready` y estados equivalentes declarados por entrada no conceden autoridad.
-- Las referencias GitHub primarias deben estar fijadas a un commit SHA de 40 hex cuando el formato de evidencia lo permita.
+- Las referencias GitHub primarias deben utilizar una referencia SHA de 40 hex cuando el formato de evidencia lo permita; una coincidencia sintáctica de 40 hex demuestra únicamente una referencia SHA con forma válida, no existencia del objeto, tipo `commit` ni firma criptográfica.
+- Cuando la política requiera demostrar que la referencia es realmente un commit, debe existir evidencia independiente del objeto Git/Commit correspondiente.
 - HTTPS no equivale a integridad del contenido.
-- Commit SHA, blob SHA, SHA-256 del contenido y firma Git son evidencias distintas.
+- Commit SHA, blob SHA, SHA-256 del contenido y firma Git son evidencias distintas y no son intercambiables.
 - Los redirects se rechazan para fetches de evidencia primaria.
 - Los hosts no confiables, userinfo, puertos no estándar, rutas ambiguas y referencias mutables se rechazan.
 - El fetch tiene timeout y límite de bytes.
 - El runtime rechaza destinos DNS no globales como defensa adicional contra SSRF.
+- La IP validada se fija en la conexión TCP y el hostname original se conserva para TLS/SNI, evitando una segunda resolución DNS durante el establecimiento de la conexión.
+- Los proxies ambientales deben permanecer explícitamente desactivados para fetches de evidencia primaria.
 - `OMEGA_VERIFIED` y `PRODUCTION_CONFIRMED` permanecen bloqueados salvo que existan todas las evidencias externas requeridas.
 - Un CI `failure` sin steps/logs observables no se clasifica automáticamente como fallo de código.
 - Un test escrito no es un test pasado; un workflow creado no es un workflow pasado.
@@ -80,4 +83,4 @@ No se permiten saltos inferenciales entre compartimentos. `UNKNOWN`, `NOT_OBSERV
 
 **OBSERVE EVERYTHING → FIX EVERYTHING FIXABLE → VERIFY EVERYTHING VERIFIABLE → RETRY EVERYTHING RETRYABLE → CLASSIFY EVERYTHING UNRESOLVED → NEVER INVENT THE LAST 1%.**
 
-Toda acción reversible y técnica autorizada puede automatizarse. Las acciones irreversibles o de producción requieren autorización específica y evidencia previa. 
+Toda acción reversible y técnica autorizada puede automatizarse. Las acciones irreversibles o de producción requieren autorización específica y evidencia previa.
