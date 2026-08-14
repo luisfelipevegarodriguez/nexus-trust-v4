@@ -41,7 +41,7 @@ class _NoRedirectHandler(HTTPRedirectHandler):
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
-    """HTTPS connection that dials a previously validated IP while preserving TLS SNI."""
+    """Dial a validated IP while preserving the original hostname for TLS SNI."""
 
     def __init__(self, host: str, pinned_ip: str, **kwargs: Any):
         self._pinned_ip = pinned_ip
@@ -172,13 +172,19 @@ class ZeroTrustEvidenceCompiler:
                 parsed_ip = ipaddress.ip_address(address)
             except ValueError as exc:
                 raise EvidenceError("DNS_INVALID_ADDRESS") from exc
-            if not parsed_ip.is_global:
-                continue
-            global_addresses.append(address)
+            if parsed_ip.is_global:
+                global_addresses.append(address)
 
         if not global_addresses:
             raise EvidenceError("DNS_NON_GLOBAL_ADDRESS_REJECTED")
         return global_addresses[0]
+
+    def _build_opener(self, pinned_ip: str):
+        return build_opener(
+            ProxyHandler({}),
+            _NoRedirectHandler(),
+            _PinnedHTTPSHandler(pinned_ip, self.tls),
+        )
 
     def fetch_primary(self, url: str, expected_sha256: str) -> Observation:
         host, immutable_reference = self._parse_and_validate_url(url)
@@ -187,14 +193,8 @@ class ZeroTrustEvidenceCompiler:
         if not immutable_reference:
             raise EvidenceError("IMMUTABLE_SOURCE_REFERENCE_REQUIRED")
 
-        # The resolved IP is pinned into the connection so a second DNS lookup
-        # cannot redirect the request to a different address between validation and connect.
         pinned_ip = self._assert_public_dns(host)
-        opener = build_opener(
-            ProxyHandler({}),
-            _NoRedirectHandler(),
-            _PinnedHTTPSHandler(pinned_ip, self.tls),
-        )
+        opener = self._build_opener(pinned_ip)
         fetched_at_ns = time.time_ns()
         request = Request(
             url,
@@ -342,8 +342,6 @@ class ZeroTrustEvidenceCompiler:
                 "ECONOMIC_STATUS": "UNKNOWN",
                 "ADVANTAGE_STATUS": "UNVERIFIED",
             },
-            # Evidence density is not a global deployment verdict. Promotion remains
-            # outside this compiler until independent CI/runtime/deployment evidence exists.
             "final_classification": "RESEARCH",
             "omega_verified": False,
             "production_confirmed": False,
