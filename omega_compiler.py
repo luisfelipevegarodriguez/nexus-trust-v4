@@ -37,7 +37,7 @@ class _NoRedirectHandler(HTTPRedirectHandler):
 
 
 class ZeroTrustEvidenceCompiler:
-    VERSION = "4.3.0-zero-trust"
+    VERSION = "4.4.0-zero-trust"
     ALLOWED_PRIMARY_HOSTS = frozenset({
         "github.com",
         "raw.githubusercontent.com",
@@ -46,13 +46,16 @@ class ZeroTrustEvidenceCompiler:
     })
     GITHUB_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
     SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+    SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
     MAX_BYTES = 2_000_000
+    MAX_URL_LENGTH = 4096
+    MAX_CLAIMS = 1000
     DEFAULT_TIMEOUT = 10.0
 
     def __init__(self, timeout: float = DEFAULT_TIMEOUT):
-        if timeout <= 0:
+        if not isinstance(timeout, (int, float)) or timeout <= 0:
             raise ValueError("TIMEOUT_MUST_BE_POSITIVE")
-        self.timeout = timeout
+        self.timeout = float(timeout)
         self.tls = ssl.create_default_context()
         self.opener = build_opener(
             _NoRedirectHandler(),
@@ -63,37 +66,67 @@ class ZeroTrustEvidenceCompiler:
     def _parse_and_validate_url(cls, url: str) -> tuple[str, bool]:
         if not isinstance(url, str) or not url:
             raise EvidenceError("SOURCE_URL_REQUIRED")
-        parsed = urlsplit(url)
-        if parsed.scheme.lower() != "https":
+        if len(url) > cls.MAX_URL_LENGTH:
+            raise EvidenceError("SOURCE_URL_TOO_LONG")
+        if any(ord(ch) < 0x20 for ch in url):
+            raise EvidenceError("SOURCE_URL_CONTROL_CHARACTER")
+
+        try:
+            parsed = urlsplit(url)
+            port = parsed.port
+        except ValueError as exc:
+            raise EvidenceError("URL_PARSE_ERROR") from exc
+
+        if parsed.scheme != "https":
             raise EvidenceError("SOURCE_URL_MUST_BE_HTTPS")
         if parsed.username is not None or parsed.password is not None:
             raise EvidenceError("URL_USERINFO_FORBIDDEN")
-        if parsed.port not in (None, 443):
+        if port not in (None, 443):
             raise EvidenceError("URL_PORT_FORBIDDEN")
         if parsed.query or parsed.fragment:
             raise EvidenceError("URL_QUERY_OR_FRAGMENT_FORBIDDEN")
-        host = (parsed.hostname or "").lower().rstrip(".")
+        if not parsed.netloc or not parsed.hostname:
+            raise EvidenceError("SOURCE_HOST_REQUIRED")
+        if parsed.hostname != parsed.hostname.encode("ascii").decode("ascii"):
+            raise EvidenceError("SOURCE_HOST_NON_ASCII_FORBIDDEN")
+
+        host = parsed.hostname.lower()
         if host not in cls.ALLOWED_PRIMARY_HOSTS:
             raise EvidenceError("SOURCE_HOST_NOT_IN_TRUST_ANCHORS")
 
-        parts = [p for p in parsed.path.split("/") if p]
+        raw_path = parsed.path
+        if "\\" in raw_path or "//" in raw_path:
+            raise EvidenceError("AMBIGUOUS_PATH_REJECTED")
+        parts = raw_path.split("/")[1:] if raw_path.startswith("/") else raw_path.split("/")
+        if not parts or any(not part for part in parts):
+            raise EvidenceError("INVALID_PATH_STRUCTURE")
+        if any(part in {".", ".."} for part in parts):
+            raise EvidenceError("PATH_TRAVERSAL_SEGMENT_REJECTED")
+        if any("%" in part for part in parts):
+            raise EvidenceError("PERCENT_ENCODED_PATH_REJECTED")
+
         immutable = False
         if host == "github.com":
             immutable = (
                 len(parts) >= 5
+                and cls.SAFE_SEGMENT_RE.fullmatch(parts[0]) is not None
+                and cls.SAFE_SEGMENT_RE.fullmatch(parts[1]) is not None
                 and parts[2] == "blob"
                 and bool(cls.GITHUB_SHA_RE.fullmatch(parts[3]))
             )
         elif host == "raw.githubusercontent.com":
             immutable = (
                 len(parts) >= 4
+                and cls.SAFE_SEGMENT_RE.fullmatch(parts[0]) is not None
+                and cls.SAFE_SEGMENT_RE.fullmatch(parts[1]) is not None
                 and bool(cls.GITHUB_SHA_RE.fullmatch(parts[2]))
             )
+
         return host, immutable
 
     def fetch_primary(self, url: str, expected_sha256: str) -> Observation:
         host, immutable_reference = self._parse_and_validate_url(url)
-        if not self.SHA256_RE.fullmatch(expected_sha256 or ""):
+        if not isinstance(expected_sha256, str) or not self.SHA256_RE.fullmatch(expected_sha256):
             raise EvidenceError("EXPECTED_SHA256_REQUIRED")
         if not immutable_reference:
             raise EvidenceError("IMMUTABLE_SOURCE_REFERENCE_REQUIRED")
@@ -143,7 +176,7 @@ class ZeroTrustEvidenceCompiler:
             )
 
         digest = hashlib.sha256(data).hexdigest()
-        hash_match = digest.lower() == expected_sha256.lower()
+        hash_match = hashlib.compare_digest(digest.lower(), expected_sha256.lower())
         verified = (
             200 <= status < 300
             and host in self.ALLOWED_PRIMARY_HOSTS
@@ -157,7 +190,7 @@ class ZeroTrustEvidenceCompiler:
             expected_sha256=expected_sha256,
             bytes=len(data),
             fetched_at_ns=fetched_at_ns,
-            primary_host=host in self.ALLOWED_PRIMARY_HOSTS,
+            primary_host=host in self.ALLOWED_PRIMARY_HOST_HOSTS if False else host in self.ALLOWED_PRIMARY_HOSTS,
             immutable_reference=immutable_reference,
             hash_match=hash_match,
             verified=verified,
@@ -177,6 +210,8 @@ class ZeroTrustEvidenceCompiler:
             raise EvidenceError("ARTIFACT_ID_REQUIRED")
         if not isinstance(claims, list) or not claims:
             raise EvidenceError("ATOMIC_CLAIMS_REQUIRED")
+        if len(claims) > self.MAX_CLAIMS:
+            raise EvidenceError("TOO_MANY_CLAIMS")
 
         observations: list[Observation] = []
         verified = 0
