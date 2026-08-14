@@ -1,6 +1,7 @@
 import hashlib
 import socket
 import unittest
+from unittest import mock
 from unittest.mock import patch
 
 from omega_compiler import EvidenceError, ZeroTrustEvidenceCompiler
@@ -40,11 +41,9 @@ class CompilerTests(unittest.TestCase):
             self.compiler.fetch_primary(url, digest)
 
     def fake_open(self, body=b"primary evidence", status=200, headers=None):
-        return patch.object(
-            self.compiler,
-            "_build_opener",
-            return_value=unittest.mock.Mock(open=unittest.mock.Mock(return_value=FakeResponse(body, status, headers))),
-        )
+        opener = mock.Mock()
+        opener.open.return_value = FakeResponse(body, status, headers)
+        return patch.object(self.compiler, "_build_opener", return_value=opener)
 
     def test_manifest_status_is_ignored(self):
         manifest = {
@@ -122,7 +121,9 @@ class CompilerTests(unittest.TestCase):
             self.assert_rejected(GOOD_URL, bad_hash)
 
     def test_redirect_is_fail_closed(self):
-        with patch.object(self.compiler, "_build_opener", return_value=unittest.mock.Mock(open=unittest.mock.Mock(side_effect=EvidenceError("REDIRECT_FORBIDDEN"))):
+        opener = mock.Mock()
+        opener.open.side_effect = EvidenceError("REDIRECT_FORBIDDEN")
+        with patch.object(self.compiler, "_build_opener", return_value=opener):
             with self.assertRaises(EvidenceError):
                 self.compiler.fetch_primary(GOOD_URL, GOOD_DIGEST)
 
@@ -159,7 +160,9 @@ class CompilerTests(unittest.TestCase):
         self.assertEqual(str(ctx.exception), "INVALID_CONTENT_LENGTH")
 
     def test_timeout_or_network_error_is_not_verified(self):
-        with patch.object(self.compiler, "_build_opener", return_value=unittest.mock.Mock(open=unittest.mock.Mock(side_effect=TimeoutError("timeout"))):
+        opener = mock.Mock()
+        opener.open.side_effect = TimeoutError("timeout")
+        with patch.object(self.compiler, "_build_opener", return_value=opener):
             result = self.compiler.fetch_primary(GOOD_URL, GOOD_DIGEST)
         self.assertFalse(result.verified)
         self.assertTrue(result.reason.startswith("FETCH_ERROR:"))
@@ -192,16 +195,17 @@ class CompilerTests(unittest.TestCase):
         with patch("omega_compiler.socket.getaddrinfo", return_value=public):
             self.assertEqual(self.compiler._assert_public_dns("github.com"), "93.184.216.34")
 
-    def test_mixed_dns_answers_drop_private_addresses(self):
+    def test_mixed_dns_answers_fail_closed(self):
         answers = [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443)),
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
         ]
         with patch("omega_compiler.socket.getaddrinfo", return_value=answers):
-            self.assertEqual(self.compiler._assert_public_dns("github.com"), "93.184.216.34")
+            with self.assertRaises(EvidenceError):
+                self.compiler._assert_public_dns("github.com")
 
     def test_proxy_handler_is_explicitly_disabled(self):
-        with patch("omega_compiler.build_opener", return_value=unittest.mock.Mock()) as build:
+        with patch("omega_compiler.build_opener", return_value=mock.Mock()) as build:
             self.compiler._build_opener("93.184.216.34")
         handlers = build.call_args.args
         self.assertTrue(any(handler.__class__.__name__ == "ProxyHandler" and handler.proxies == {} for handler in handlers))
