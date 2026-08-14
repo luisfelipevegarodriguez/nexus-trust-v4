@@ -10,9 +10,9 @@ import socket
 import ssl
 import time
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 
 
 class EvidenceError(Exception):
@@ -40,7 +40,7 @@ class _NoRedirectHandler(HTTPRedirectHandler):
 
 
 class ZeroTrustEvidenceCompiler:
-    VERSION = "4.5.0-zero-trust"
+    VERSION = "4.5.1-zero-trust"
     # Only sources whose URL can itself carry an immutable Git commit reference
     # are accepted as primary evidence by this compiler.
     ALLOWED_PRIMARY_HOSTS = frozenset({
@@ -61,6 +61,7 @@ class ZeroTrustEvidenceCompiler:
         self.timeout = float(timeout)
         self.tls = ssl.create_default_context()
         self.opener = build_opener(
+            ProxyHandler({}),
             _NoRedirectHandler(),
             HTTPSHandler(context=self.tls),
         )
@@ -81,8 +82,6 @@ class ZeroTrustEvidenceCompiler:
         except ValueError as exc:
             raise EvidenceError("URL_PARSE_ERROR") from exc
 
-        # urlsplit normalizes the scheme/hostname casing, but never trust
-        # netloc text directly. Reject userinfo, non-HTTPS, and non-default ports.
         if parsed.scheme != "https":
             raise EvidenceError("SOURCE_URL_MUST_BE_HTTPS")
         if parsed.username is not None or parsed.password is not None:
@@ -166,12 +165,35 @@ class ZeroTrustEvidenceCompiler:
             url,
             headers={
                 "Accept": "application/octet-stream",
+                "Accept-Encoding": "identity",
                 "User-Agent": f"OmegaEvidenceCompiler/{self.VERSION}",
             },
         )
         try:
             with self.opener.open(request, timeout=self.timeout) as response:
                 status = int(response.status)
+                content_length = response.headers.get("Content-Length")
+                if content_length is not None:
+                    try:
+                        declared_length = int(content_length)
+                    except (TypeError, ValueError) as exc:
+                        raise EvidenceError("INVALID_CONTENT_LENGTH") from exc
+                    if declared_length < 0:
+                        raise EvidenceError("INVALID_CONTENT_LENGTH")
+                    if declared_length > self.MAX_BYTES:
+                        return Observation(
+                            url=url,
+                            http_status=status,
+                            content_sha256="",
+                            expected_sha256=expected_sha256,
+                            bytes=declared_length,
+                            fetched_at_ns=fetched_at_ns,
+                            primary_host=host in self.ALLOWED_PRIMARY_HOSTS,
+                            immutable_reference=immutable_reference,
+                            hash_match=False,
+                            verified=False,
+                            reason="SOURCE_TOO_LARGE",
+                        )
                 data = response.read(self.MAX_BYTES + 1)
         except EvidenceError:
             raise
@@ -290,8 +312,6 @@ class ZeroTrustEvidenceCompiler:
                 "ECONOMIC_STATUS": "UNKNOWN",
                 "ADVANTAGE_STATUS": "UNVERIFIED",
             },
-            # Candidate means evidence was actually observed, not that CI,
-            # runtime, deployment, or production have been verified.
             "final_classification": "CANDIDATE" if density >= 0.90 else "RESEARCH",
             "omega_verified": False,
             "production_confirmed": False,
