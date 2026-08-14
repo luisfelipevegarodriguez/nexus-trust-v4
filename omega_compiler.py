@@ -9,7 +9,7 @@ import time
 from dataclasses import asdict, dataclass
 from typing import Any
 from urllib.parse import urlparse
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
 
 class EvidenceError(Exception):
@@ -37,7 +37,7 @@ class _NoRedirectHandler(HTTPRedirectHandler):
 
 
 class ZeroTrustEvidenceCompiler:
-    VERSION = "4.2.0-zero-trust-pinned"
+    VERSION = "4.2.1-zero-trust-pinned"
     ALLOWED_PRIMARY_HOSTS = frozenset({
         "github.com",
         "raw.githubusercontent.com",
@@ -50,7 +50,10 @@ class ZeroTrustEvidenceCompiler:
     def __init__(self, timeout: float = 10.0):
         self.timeout = timeout
         self.tls = ssl.create_default_context()
-        self.opener = build_opener(_NoRedirectHandler())
+        self.opener = build_opener(
+            _NoRedirectHandler(),
+            HTTPSHandler(context=self.tls),
+        )
 
     def _parse_and_validate_url(self, url: str) -> tuple[str, bool]:
         parsed = urlparse(url)
@@ -63,8 +66,6 @@ class ZeroTrustEvidenceCompiler:
         immutable = False
         if host in {"github.com", "raw.githubusercontent.com"}:
             parts = [p for p in parsed.path.split("/") if p]
-            # github.com/owner/repo/(blob|tree)/<40-hex-SHA>/...
-            # raw.githubusercontent.com/owner/repo/<40-hex-SHA>/...
             if host == "github.com":
                 immutable = (
                     len(parts) >= 5
@@ -85,7 +86,7 @@ class ZeroTrustEvidenceCompiler:
         fetched_at_ns = time.time_ns()
         request = Request(url, headers={"User-Agent": "OmegaEvidenceCompiler/4.2"})
         try:
-            with self.opener.open(request, timeout=self.timeout, context=self.tls) as response:
+            with self.opener.open(request, timeout=self.timeout) as response:
                 status = int(response.status)
                 data = response.read(self.MAX_BYTES + 1)
         except EvidenceError:
@@ -93,7 +94,8 @@ class ZeroTrustEvidenceCompiler:
         except Exception as exc:
             return Observation(
                 url, 0, "", expected_sha256, 0, fetched_at_ns,
-                False, immutable_reference, False, False, type(exc).__name__
+                host in self.ALLOWED_PRIMARY_HOSTS, immutable_reference,
+                False, False, type(exc).__name__
             )
 
         if len(data) > self.MAX_BYTES:
@@ -104,7 +106,12 @@ class ZeroTrustEvidenceCompiler:
 
         digest = hashlib.sha256(data).hexdigest()
         hash_match = digest.lower() == expected_sha256.lower()
-        verified = 200 <= status < 300 and host in self.ALLOWED_PRIMARY_HOSTS and immutable_reference and hash_match
+        verified = (
+            200 <= status < 300
+            and host in self.ALLOWED_PRIMARY_HOSTS
+            and immutable_reference
+            and hash_match
+        )
         reason = "DIRECT_PRIMARY_FETCH_HASH_MATCH" if verified else "HASH_MISMATCH"
         return Observation(
             url=url,
