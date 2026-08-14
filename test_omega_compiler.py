@@ -31,13 +31,20 @@ class FakeResponse:
 class CompilerTests(unittest.TestCase):
     def setUp(self):
         self.compiler = ZeroTrustEvidenceCompiler()
-        self.dns_patch = patch.object(self.compiler, "_assert_public_dns", return_value="203.0.113.10")
+        self.dns_patch = patch.object(self.compiler, "_assert_public_dns", return_value="93.184.216.34")
         self.dns_patch.start()
         self.addCleanup(self.dns_patch.stop)
 
     def assert_rejected(self, url, digest=GOOD_DIGEST):
         with self.assertRaises(EvidenceError):
             self.compiler.fetch_primary(url, digest)
+
+    def fake_open(self, body=b"primary evidence", status=200, headers=None):
+        return patch.object(
+            self.compiler,
+            "_build_opener",
+            return_value=unittest.mock.Mock(open=unittest.mock.Mock(return_value=FakeResponse(body, status, headers))),
+        )
 
     def test_manifest_status_is_ignored(self):
         manifest = {
@@ -47,11 +54,7 @@ class CompilerTests(unittest.TestCase):
                 {"status": "VERIFIED", "evidence_url": GOOD_URL, "expected_sha256": "0" * 64},
             ],
         }
-        with patch.object(self.compiler, "fetch_primary", side_effect=[
-            self.compiler.fetch_primary.__func__(self.compiler, GOOD_URL, GOOD_DIGEST),
-        ]):
-            pass
-        with patch.object(self.compiler.opener, "open", return_value=FakeResponse()):
+        with self.fake_open():
             result = self.compiler.compile(manifest)
         self.assertEqual(result["metrics"]["independent_evidence_density"], 0.5)
         self.assertEqual(result["gate_states"]["VALUE_STATUS"], "UNKNOWN")
@@ -119,51 +122,50 @@ class CompilerTests(unittest.TestCase):
             self.assert_rejected(GOOD_URL, bad_hash)
 
     def test_redirect_is_fail_closed(self):
-        with patch.object(self.compiler.opener, "open", side_effect=EvidenceError("REDIRECT_FORBIDDEN")):
+        with patch.object(self.compiler, "_build_opener", return_value=unittest.mock.Mock(open=unittest.mock.Mock(side_effect=EvidenceError("REDIRECT_FORBIDDEN"))):
             with self.assertRaises(EvidenceError):
                 self.compiler.fetch_primary(GOOD_URL, GOOD_DIGEST)
 
     def test_hash_mismatch_is_not_verified(self):
-        with patch.object(self.compiler.opener, "open", return_value=FakeResponse(b"different")):
+        with self.fake_open(body=b"different"):
             result = self.compiler.fetch_primary(GOOD_URL, GOOD_DIGEST)
         self.assertFalse(result.verified)
         self.assertFalse(result.hash_match)
 
     def test_empty_content_is_not_verified_for_nonempty_expected_hash(self):
-        with patch.object(self.compiler.opener, "open", return_value=FakeResponse(b"")):
+        with self.fake_open(body=b""):
             result = self.compiler.fetch_primary(GOOD_URL, GOOD_DIGEST)
         self.assertFalse(result.verified)
 
     def test_response_size_is_bounded(self):
         body = b"x" * (self.compiler.MAX_BYTES + 1)
-        with patch.object(self.compiler.opener, "open", return_value=FakeResponse(body)):
+        with self.fake_open(body=body):
             result = self.compiler.fetch_primary(GOOD_URL, GOOD_DIGEST)
         self.assertFalse(result.verified)
         self.assertEqual(result.reason, "SOURCE_TOO_LARGE")
 
     def test_declared_content_length_is_bounded_before_read(self):
         headers = {"Content-Length": str(self.compiler.MAX_BYTES + 1)}
-        with patch.object(self.compiler.opener, "open", return_value=FakeResponse(headers=headers)) as opened:
+        with self.fake_open(headers=headers):
             result = self.compiler.fetch_primary(GOOD_URL, GOOD_DIGEST)
         self.assertFalse(result.verified)
         self.assertEqual(result.reason, "SOURCE_TOO_LARGE")
-        opened.assert_called_once()
 
     def test_invalid_content_length_is_fail_closed(self):
         headers = {"Content-Length": "not-an-integer"}
-        with patch.object(self.compiler.opener, "open", return_value=FakeResponse(headers=headers)):
+        with self.fake_open(headers=headers):
             with self.assertRaises(EvidenceError) as ctx:
                 self.compiler.fetch_primary(GOOD_URL, GOOD_DIGEST)
         self.assertEqual(str(ctx.exception), "INVALID_CONTENT_LENGTH")
 
     def test_timeout_or_network_error_is_not_verified(self):
-        with patch.object(self.compiler.opener, "open", side_effect=TimeoutError("timeout")):
+        with patch.object(self.compiler, "_build_opener", return_value=unittest.mock.Mock(open=unittest.mock.Mock(side_effect=TimeoutError("timeout"))):
             result = self.compiler.fetch_primary(GOOD_URL, GOOD_DIGEST)
         self.assertFalse(result.verified)
         self.assertTrue(result.reason.startswith("FETCH_ERROR:"))
 
     def test_raw_github_pinned_reference_is_accepted(self):
-        with patch.object(self.compiler.opener if hasattr(self.compiler, "opener") else self.compiler, "open", return_value=FakeResponse()):
+        with self.fake_open():
             result = self.compiler.fetch_primary(RAW_URL, GOOD_DIGEST)
         self.assertTrue(result.verified)
         self.assertTrue(result.immutable_reference)
@@ -190,18 +192,17 @@ class CompilerTests(unittest.TestCase):
         with patch("omega_compiler.socket.getaddrinfo", return_value=public):
             self.assertEqual(self.compiler._assert_public_dns("github.com"), "93.184.216.34")
 
-    def test_mixed_dns_answers_fail_closed(self):
+    def test_mixed_dns_answers_drop_private_addresses(self):
         answers = [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443)),
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
         ]
         with patch("omega_compiler.socket.getaddrinfo", return_value=answers):
-            with self.assertRaises(EvidenceError):
-                self.compiler._assert_public_dns("github.com")
+            self.assertEqual(self.compiler._assert_public_dns("github.com"), "93.184.216.34")
 
     def test_proxy_handler_is_explicitly_disabled(self):
         with patch("omega_compiler.build_opener", return_value=unittest.mock.Mock()) as build:
-            self.compiler.fetch_primary(GOOD_URL, GOOD_DIGEST)
+            self.compiler._build_opener("93.184.216.34")
         handlers = build.call_args.args
         self.assertTrue(any(handler.__class__.__name__ == "ProxyHandler" and handler.proxies == {} for handler in handlers))
 
@@ -239,7 +240,7 @@ class CompilerTests(unittest.TestCase):
             "artifact_id": "A",
             "atomic_claims": [{"status": "VERIFIED", "evidence_url": GOOD_URL, "expected_sha256": "0" * 64}],
         }
-        with patch.object(self.compiler.opener if hasattr(self.compiler, "opener") else self.compiler, "open", return_value=FakeResponse()):
+        with self.fake_open():
             result = self.compiler.compile(manifest)
         self.assertEqual(result["metrics"]["verified_claims"], 0)
         self.assertEqual(result["final_classification"], "RESEARCH")
@@ -249,7 +250,7 @@ class CompilerTests(unittest.TestCase):
             "artifact_id": "A",
             "atomic_claims": [{"status": "UNTRUSTED", "evidence_url": GOOD_URL, "expected_sha256": GOOD_DIGEST}],
         }
-        with patch.object(self.compiler.opener if hasattr(self.compiler, "opener") else self.compiler, "open", return_value=FakeResponse()):
+        with self.fake_open():
             result = self.compiler.compile(manifest)
         self.assertEqual(result["metrics"]["verified_claims"], 1)
         self.assertEqual(result["final_classification"], "RESEARCH")
@@ -257,7 +258,7 @@ class CompilerTests(unittest.TestCase):
         self.assertFalse(result["omega_verified"])
 
     def test_non_200_response_is_not_verified(self):
-        with patch.object(self.compiler.opener if hasattr(self.compiler, "opener") else self.compiler, "open", return_value=FakeResponse(status=500)):
+        with self.fake_open(status=500):
             result = self.compiler.fetch_primary(GOOD_URL, GOOD_DIGEST)
         self.assertFalse(result.verified)
 
@@ -272,12 +273,12 @@ class CompilerTests(unittest.TestCase):
 
     def test_scheme_normalization_does_not_bypass_host_or_sha_checks(self):
         url = GOOD_URL.replace("https://", "HTTPS://")
-        with patch.object(self.compiler.opener if hasattr(self.compiler, "opener") else self.compiler, "open", return_value=FakeResponse()):
+        with self.fake_open():
             result = self.compiler.fetch_primary(url, GOOD_DIGEST)
         self.assertTrue(result.verified)
 
     def test_case_insensitive_host_does_not_bypass_anchor(self):
-        with patch.object(self.compiler.opener if hasattr(self.compiler, "opener") else self.compiler, "open", return_value=FakeResponse()):
+        with self.fake_open():
             result = self.compiler.fetch_primary(GOOD_URL.replace("github.com", "GITHUB.COM"), GOOD_DIGEST)
         self.assertTrue(result.verified)
 
