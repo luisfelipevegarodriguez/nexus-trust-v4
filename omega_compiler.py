@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
 import re
 import ssl
@@ -37,7 +38,7 @@ class _NoRedirectHandler(HTTPRedirectHandler):
 
 
 class ZeroTrustEvidenceCompiler:
-    VERSION = "4.4.0-zero-trust"
+    VERSION = "4.4.1-zero-trust"
     ALLOWED_PRIMARY_HOSTS = frozenset({
         "github.com",
         "raw.githubusercontent.com",
@@ -83,12 +84,15 @@ class ZeroTrustEvidenceCompiler:
             raise EvidenceError("URL_USERINFO_FORBIDDEN")
         if port not in (None, 443):
             raise EvidenceError("URL_PORT_FORBIDDEN")
-        if parsed.query or parsed.fragment:
-            raise EvidenceError("URL_QUERY_OR_FRAGMENT_FORBIDDEN")
         if not parsed.netloc or not parsed.hostname:
             raise EvidenceError("SOURCE_HOST_REQUIRED")
-        if parsed.hostname != parsed.hostname.encode("ascii").decode("ascii"):
-            raise EvidenceError("SOURCE_HOST_NON_ASCII_FORBIDDEN")
+        if parsed.query or parsed.fragment:
+            raise EvidenceError("URL_QUERY_OR_FRAGMENT_FORBIDDEN")
+
+        try:
+            parsed.hostname.encode("ascii")
+        except UnicodeEncodeError as exc:
+            raise EvidenceError("SOURCE_HOST_NON_ASCII_FORBIDDEN") from exc
 
         host = parsed.hostname.lower()
         if host not in cls.ALLOWED_PRIMARY_HOSTS:
@@ -168,7 +172,7 @@ class ZeroTrustEvidenceCompiler:
                 expected_sha256=expected_sha256,
                 bytes=len(data),
                 fetched_at_ns=fetched_at_ns,
-                primary_host=True,
+                primary_host=host in self.ALLOWED_PRIMARY_HOSTS,
                 immutable_reference=immutable_reference,
                 hash_match=False,
                 verified=False,
@@ -176,7 +180,7 @@ class ZeroTrustEvidenceCompiler:
             )
 
         digest = hashlib.sha256(data).hexdigest()
-        hash_match = hashlib.compare_digest(digest.lower(), expected_sha256.lower())
+        hash_match = hmac.compare_digest(digest.lower(), expected_sha256.lower())
         verified = (
             200 <= status < 300
             and host in self.ALLOWED_PRIMARY_HOSTS
@@ -190,7 +194,7 @@ class ZeroTrustEvidenceCompiler:
             expected_sha256=expected_sha256,
             bytes=len(data),
             fetched_at_ns=fetched_at_ns,
-            primary_host=host in self.ALLOWED_PRIMARY_HOST_HOSTS if False else host in self.ALLOWED_PRIMARY_HOSTS,
+            primary_host=host in self.ALLOWED_PRIMARY_HOSTS,
             immutable_reference=immutable_reference,
             hash_match=hash_match,
             verified=verified,
