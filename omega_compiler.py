@@ -70,7 +70,7 @@ class _PinnedHTTPSHandler(HTTPSHandler):
 
 
 class ZeroTrustEvidenceCompiler:
-    VERSION = "4.6.0-zero-trust"
+    VERSION = "4.6.1-zero-trust"
     ALLOWED_PRIMARY_HOSTS = frozenset({
         "github.com",
         "raw.githubusercontent.com",
@@ -156,7 +156,7 @@ class ZeroTrustEvidenceCompiler:
 
     @staticmethod
     def _assert_public_dns(host: str) -> str:
-        """Resolve once, reject non-global addresses, and return the pinned address."""
+        """Resolve once; any non-global answer is rejected; one global IP is pinned."""
         try:
             infos = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
         except OSError as exc:
@@ -172,11 +172,10 @@ class ZeroTrustEvidenceCompiler:
                 parsed_ip = ipaddress.ip_address(address)
             except ValueError as exc:
                 raise EvidenceError("DNS_INVALID_ADDRESS") from exc
-            if parsed_ip.is_global:
-                global_addresses.append(address)
+            if not parsed_ip.is_global:
+                raise EvidenceError("DNS_NON_GLOBAL_ADDRESS_REJECTED")
+            global_addresses.append(address)
 
-        if not global_addresses:
-            raise EvidenceError("DNS_NON_GLOBAL_ADDRESS_REJECTED")
         return global_addresses[0]
 
     def _build_opener(self, pinned_ip: str):
