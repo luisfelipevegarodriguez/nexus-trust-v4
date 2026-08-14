@@ -23,9 +23,6 @@ jobs:
       TARGET_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       PYTHONHASHSEED: "0"
       GIT_TERMINAL_PROMPT: "0"
-      GIT_CONFIG_COUNT: "1"
-      GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader"
-      GIT_CONFIG_VALUE_0: "AUTHORIZATION: bearer ${{ github.token }}"
     steps:
       - name: Fetch exact source commit
         shell: bash
