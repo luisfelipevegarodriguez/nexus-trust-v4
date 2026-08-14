@@ -17,16 +17,19 @@ jobs:
   test:
     runs-on: ubuntu-22.04
     timeout-minutes: 5
+    env:
+      TARGET_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
     steps:
-      - name: Fetch exact event commit without third-party actions
+      - name: Fetch exact source commit
         shell: bash
         run: |
           set -euo pipefail
+          test -n "${TARGET_SHA}"
           git init .
           git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          git -c protocol.version=2 fetch --no-tags --depth=1 origin "${GITHUB_SHA}"
+          git -c protocol.version=2 fetch --no-tags --depth=1 origin "${TARGET_SHA}"
           git checkout --detach FETCH_HEAD
-          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test "$(git rev-parse HEAD)" = "${TARGET_SHA}"
 
       - name: Verify interpreter
         run: python3 --version
