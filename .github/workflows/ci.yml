@@ -1,0 +1,55 @@
+name: omega-zero-trust-ci
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: omega-zero-trust-${{ github.workflow }}-${{ github.event.pull_request.head.sha || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    env:
+      TARGET_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      PYTHONHASHSEED: "0"
+      GIT_TERMINAL_PROMPT: "0"
+    steps:
+      - name: Fetch exact source commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${TARGET_SHA}"
+          git init .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git -c protocol.version=2 fetch --no-tags --depth=2 origin "${TARGET_SHA}"
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "${TARGET_SHA}"
+          test "$(git cat-file -t "${TARGET_SHA}")" = "commit"
+          git diff --check "${TARGET_SHA}^" "${TARGET_SHA}"
+
+      - name: Record commit signature state
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'HEAD=%s\n' "$(git rev-parse HEAD)"
+          printf 'SIGNATURE_STATUS=%s\n' "$(git log -1 --format=%G? "${TARGET_SHA}")"
+          printf 'AUTHOR=%s\n' "$(git log -1 --format='%an <%ae>' "${TARGET_SHA}")"
+
+      - name: Verify interpreter
+        run: python3 --version
+
+      - name: Compile source
+        run: python3 -m py_compile omega_compiler.py test_omega_compiler.py
+
+      - name: Run adversarial unit tests
+        run: python3 -m unittest discover -v
