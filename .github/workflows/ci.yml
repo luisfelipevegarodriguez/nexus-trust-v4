@@ -32,10 +32,9 @@ jobs:
         run: |
           set -euo pipefail
           test -n "${TARGET_SHA}"
-          test "${TARGET_SHA}" = "${TARGET_SHA#*[!0-9a-fA-F]}" || true
           git init .
           git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          git -c protocol.version=2 fetch --no-tags --depth=1 origin "${TARGET_SHA}"
+          git -c protocol.version=2 fetch --no-tags --depth=2 origin "${TARGET_SHA}"
           git checkout --detach FETCH_HEAD
           test "$(git rev-parse HEAD)" = "${TARGET_SHA}"
           test "$(git cat-file -t "${TARGET_SHA}")" = "commit"
@@ -47,7 +46,7 @@ jobs:
           set -euo pipefail
           printf 'HEAD=%s\n' "$(git rev-parse HEAD)"
           printf 'SIGNATURE_STATUS=%s\n' "$(git log -1 --format=%G? "${TARGET_SHA}")"
-          printf 'AUTHOR=%s\n' "$(git log -1 --format=%an <%ae> "${TARGET_SHA}")"
+          printf 'AUTHOR=%s\n' "$(git log -1 --format='%an <%ae>' "${TARGET_SHA}")"
 
       - name: Verify interpreter
         run: python3 --version
