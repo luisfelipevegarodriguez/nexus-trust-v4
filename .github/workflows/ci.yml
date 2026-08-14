@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: omega-zero-trust-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-22.04
@@ -28,7 +32,7 @@ jobs:
         run: python3 --version
 
       - name: Run adversarial unit tests
-        run: python3 -m unittest -v
+        run: python3 -m unittest discover -v
 
-      - name: Compile bytecode without writing outside workspace
+      - name: Compile bytecode
         run: python3 -m py_compile omega_compiler.py test_omega_compiler.py
