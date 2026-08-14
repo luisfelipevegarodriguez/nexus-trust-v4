@@ -1,0 +1,27 @@
+name: omega-zero-trust-ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, "autofix/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout pinned action
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Verify interpreter
+        run: python3 --version
+
+      - name: Run adversarial unit tests
+        run: python3 -m unittest -v
+
+      - name: Compile bytecode without writing outside workspace
+        run: python3 -m py_compile omega_compiler.py test_omega_compiler.py
