@@ -4,7 +4,7 @@ import unittest
 from unittest import mock
 from unittest.mock import patch
 
-from omega_compiler import EvidenceError, ZeroTrustEvidenceCompiler
+from omega_compiler import EvidenceError, ZeroTrustEvidenceCompiler, _PinnedHTTPSConnection
 
 
 SHA = "0123456789abcdef0123456789abcdef01234567"
@@ -209,6 +209,17 @@ class CompilerTests(unittest.TestCase):
             self.compiler._build_opener("93.184.216.34")
         handlers = build.call_args.args
         self.assertTrue(any(handler.__class__.__name__ == "ProxyHandler" and handler.proxies == {} for handler in handlers))
+
+    def test_pinned_connection_dials_validated_ip_and_preserves_tls_hostname(self):
+        connection = _PinnedHTTPSConnection("github.com", pinned_ip="93.184.216.34", timeout=3)
+        raw_socket = mock.Mock()
+        tls_socket = mock.Mock()
+        with patch("omega_compiler.socket.create_connection", return_value=raw_socket) as dial:
+            with patch.object(connection._context, "wrap_socket", return_value=tls_socket) as wrap:
+                connection.connect()
+        dial.assert_called_once_with(("93.184.216.34", 443), 3, None)
+        wrap.assert_called_once_with(raw_socket, server_hostname="github.com")
+        self.assertIs(connection.sock, tls_socket)
 
     def test_missing_manifest_is_rejected(self):
         with self.assertRaises(EvidenceError):
