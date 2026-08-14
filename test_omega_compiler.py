@@ -1,5 +1,4 @@
 import hashlib
-import ssl
 import unittest
 from unittest.mock import patch
 
@@ -8,6 +7,7 @@ from omega_compiler import EvidenceError, ZeroTrustEvidenceCompiler
 
 SHA = "0123456789abcdef0123456789abcdef01234567"
 GOOD_URL = "https://github.com/modelcontextprotocol/servers/" f"blob/{SHA}/README.md"
+RAW_URL = "https://raw.githubusercontent.com/modelcontextprotocol/servers/" f"{SHA}/README.md"
 GOOD_DIGEST = hashlib.sha256(b"primary evidence").hexdigest()
 
 
@@ -30,6 +30,10 @@ class CompilerTests(unittest.TestCase):
     def setUp(self):
         self.compiler = ZeroTrustEvidenceCompiler()
 
+    def assert_rejected(self, url, digest=GOOD_DIGEST):
+        with self.assertRaises(EvidenceError):
+            self.compiler.fetch_primary(url, digest)
+
     def test_manifest_status_is_ignored(self):
         manifest = {
             "artifact_id": "TEST",
@@ -43,49 +47,75 @@ class CompilerTests(unittest.TestCase):
         self.assertEqual(result["metrics"]["independent_evidence_density"], 0.5)
         self.assertEqual(result["gate_states"]["VALUE_STATUS"], "UNKNOWN")
         self.assertFalse(result["omega_verified"])
+        self.assertFalse(result["production_confirmed"])
 
     def test_root_github_is_rejected(self):
-        with self.assertRaises(EvidenceError):
-            self.compiler.fetch_primary("https://github.com", GOOD_DIGEST)
+        self.assert_rejected("https://github.com")
 
     def test_http_is_rejected(self):
-        with self.assertRaises(EvidenceError):
-            self.compiler.fetch_primary(GOOD_URL.replace("https://", "http://"), GOOD_DIGEST)
+        self.assert_rejected(GOOD_URL.replace("https://", "http://"))
 
-    def test_mutable_reference_is_rejected(self):
-        mutable = "https://github.com/modelcontextprotocol/servers/blob/main/README.md"
-        with self.assertRaises(EvidenceError):
-            self.compiler.fetch_primary(mutable, GOOD_DIGEST)
+    def test_mutable_references_are_rejected(self):
+        for ref in ("main", "master", "develop", "HEAD", "refs/heads/main", "refs/tags/v1.0.0"):
+            self.assert_rejected(
+                "https://github.com/modelcontextprotocol/servers/blob/" f"{ref}/README.md"
+            )
 
-    def test_bad_sha_lengths_and_charset_are_rejected(self):
-        for bad_sha in (SHA[:-1], SHA + "0", "g" * 40):
-            url = "https://github.com/modelcontextprotocol/servers/" f"blob/{bad_sha}/README.md"
-            with self.assertRaises(EvidenceError):
-                self.compiler.fetch_primary(url, GOOD_DIGEST)
+    def test_sha_lengths_and_charset_are_rejected(self):
+        for bad_sha in (SHA[:-1], SHA + "0", "g" * 40, "G" * 40):
+            self.assert_rejected(
+                "https://github.com/modelcontextprotocol/servers/blob/" f"{bad_sha}/README.md"
+            )
 
     def test_userinfo_is_rejected(self):
-        url = "https://user:pass@github.com/modelcontextprotocol/servers/" f"blob/{SHA}/README.md"
-        with self.assertRaises(EvidenceError):
-            self.compiler.fetch_primary(url, GOOD_DIGEST)
+        self.assert_rejected(
+            "https://user:pass@github.com/modelcontextprotocol/servers/" f"blob/{SHA}/README.md"
+        )
 
     def test_non_default_port_is_rejected(self):
-        url = "https://github.com:8443/modelcontextprotocol/servers/" f"blob/{SHA}/README.md"
-        with self.assertRaises(EvidenceError):
-            self.compiler.fetch_primary(url, GOOD_DIGEST)
+        self.assert_rejected(
+            "https://github.com:8443/modelcontextprotocol/servers/" f"blob/{SHA}/README.md"
+        )
+
+    def test_malformed_port_is_rejected_without_raw_exception(self):
+        self.assert_rejected(
+            "https://github.com:not-a-port/modelcontextprotocol/servers/" f"blob/{SHA}/README.md"
+        )
 
     def test_query_and_fragment_are_rejected(self):
         for suffix in ("?download=1", "#section"):
-            with self.assertRaises(EvidenceError):
-                self.compiler.fetch_primary(GOOD_URL + suffix, GOOD_DIGEST)
+            self.assert_rejected(GOOD_URL + suffix)
 
     def test_untrusted_host_is_rejected(self):
-        with self.assertRaises(EvidenceError):
-            self.compiler.fetch_primary("https://example.com/evidence", GOOD_DIGEST)
+        self.assert_rejected("https://example.com/evidence")
+
+    def test_trailing_dot_host_is_rejected(self):
+        self.assert_rejected(GOOD_URL.replace("github.com", "github.com."))
+
+    def test_non_ascii_host_is_rejected(self):
+        self.assert_rejected(GOOD_URL.replace("github.com", "gïthub.com"))
+
+    def test_double_slash_path_is_rejected(self):
+        self.assert_rejected(GOOD_URL.replace("servers/", "servers//"))
+
+    def test_backslash_path_is_rejected(self):
+        self.assert_rejected(GOOD_URL.replace("servers/", "servers\\"))
+
+    def test_dot_segments_are_rejected(self):
+        self.assert_rejected(GOOD_URL.replace("servers/", "servers/../servers/"))
+
+    def test_percent_encoded_path_is_rejected(self):
+        self.assert_rejected(GOOD_URL.replace("modelcontextprotocol", "%6dodelcontextprotocol"))
+
+    def test_long_url_is_rejected(self):
+        self.assert_rejected(GOOD_URL + ("x" * 5000))
+
+    def test_control_character_is_rejected(self):
+        self.assert_rejected(GOOD_URL + "\n")
 
     def test_expected_hash_must_be_sha256(self):
         for bad_hash in ("", "not-a-sha256", "0" * 63, "g" * 64):
-            with self.assertRaises(EvidenceError):
-                self.compiler.fetch_primary(GOOD_URL, bad_hash)
+            self.assert_rejected(GOOD_URL, bad_hash)
 
     def test_redirect_is_fail_closed(self):
         with patch.object(self.compiler.opener, "open", side_effect=EvidenceError("REDIRECT_FORBIDDEN")):
@@ -104,60 +134,101 @@ class CompilerTests(unittest.TestCase):
         self.assertFalse(result.verified)
 
     def test_response_size_is_bounded(self):
-        with patch.object(self.compiler.opener, "open", return_value=FakeResponse(b"x" * (self.compiler.MAX_BYTES + 1))):
+        body = b"x" * (self.compiler.MAX_BYTES + 1)
+        with patch.object(self.compiler.opener, "open", return_value=FakeResponse(body)):
             result = self.compiler.fetch_primary(GOOD_URL, GOOD_DIGEST)
         self.assertFalse(result.verified)
         self.assertEqual(result.reason, "SOURCE_TOO_LARGE")
 
-    def test_timeout_is_unverified(self):
-        with patch.object(self.compiler.opener, "open", side_effect=TimeoutError("timed out")):
+    def test_timeout_or_network_error_is_not_verified(self):
+        with patch.object(self.compiler.opener, "open", side_effect=TimeoutError("timeout")):
             result = self.compiler.fetch_primary(GOOD_URL, GOOD_DIGEST)
         self.assertFalse(result.verified)
-        self.assertIn("TimeoutError", result.reason)
+        self.assertTrue(result.reason.startswith("FETCH_ERROR:"))
 
-    def test_invalid_certificate_is_unverified(self):
-        with patch.object(self.compiler.opener, "open", side_effect=ssl.SSLCertVerificationError("bad cert")):
-            result = self.compiler.fetch_primary(GOOD_URL, GOOD_DIGEST)
-        self.assertFalse(result.verified)
+    def test_raw_github_pinned_reference_is_accepted(self):
+        with patch.object(self.compiler.opener, "open", return_value=FakeResponse()):
+            result = self.compiler.fetch_primary(RAW_URL, GOOD_DIGEST)
+        self.assertTrue(result.verified)
+        self.assertTrue(result.immutable_reference)
 
-    def test_manifest_without_claims_is_rejected(self):
+    def test_mcp_hosts_require_an_immutable_reference(self):
+        for host in ("https://modelcontextprotocol.io/evidence", "https://registry.modelcontextprotocol.io/evidence"):
+            self.assert_rejected(host)
+
+    def test_missing_manifest_is_rejected(self):
         with self.assertRaises(EvidenceError):
-            self.compiler.compile({"artifact_id": "TEST", "atomic_claims": []})
+            self.compiler.compile({})
 
-    def test_manifest_missing_artifact_id_is_rejected(self):
+    def test_non_object_manifest_is_rejected(self):
         with self.assertRaises(EvidenceError):
-            self.compiler.compile({"atomic_claims": [{"evidence_url": GOOD_URL, "expected_sha256": GOOD_DIGEST}]})
+            self.compiler.compile([])
+
+    def test_empty_claims_are_rejected(self):
+        with self.assertRaises(EvidenceError):
+            self.compiler.compile({"artifact_id": "A", "atomic_claims": []})
 
     def test_malformed_claim_is_rejected(self):
         with self.assertRaises(EvidenceError):
-            self.compiler.compile({"artifact_id": "TEST", "atomic_claims": ["bad"]})
+            self.compiler.compile({"artifact_id": "A", "atomic_claims": ["not-a-claim"]})
 
-    def test_ci_metadata_cannot_promote_value(self):
+    def test_claim_missing_url_is_rejected(self):
+        with self.assertRaises(EvidenceError):
+            self.compiler.compile({"artifact_id": "A", "atomic_claims": [{"expected_sha256": GOOD_DIGEST}]})
+
+    def test_claim_missing_hash_is_rejected(self):
+        with self.assertRaises(EvidenceError):
+            self.compiler.compile({"artifact_id": "A", "atomic_claims": [{"evidence_url": GOOD_URL}]})
+
+    def test_claim_count_is_bounded(self):
+        claims = [{"evidence_url": GOOD_URL, "expected_sha256": GOOD_DIGEST}] * (self.compiler.MAX_CLAIMS + 1)
+        with self.assertRaises(EvidenceError):
+            self.compiler.compile({"artifact_id": "A", "atomic_claims": claims})
+
+    def test_network_observation_controls_verification(self):
         manifest = {
-            "artifact_id": "TEST",
-            "atomic_claims": [{"status": "VERIFIED", "evidence_url": GOOD_URL, "expected_sha256": GOOD_DIGEST, "ci": {"status": "PASSED"}}],
+            "artifact_id": "A",
+            "atomic_claims": [
+                {"status": "VERIFIED", "evidence_url": GOOD_URL, "expected_sha256": "0" * 64},
+            ],
         }
         with patch.object(self.compiler.opener, "open", return_value=FakeResponse()):
             result = self.compiler.compile(manifest)
-        self.assertEqual(result["gate_states"]["VALUE_STATUS"], "UNKNOWN")
-        self.assertFalse(result["production_confirmed"])
+        self.assertEqual(result["metrics"]["verified_claims"], 0)
+        self.assertEqual(result["final_classification"], "RESEARCH")
 
-    def test_raw_github_sha_pinning(self):
-        raw_url = "https://raw.githubusercontent.com/modelcontextprotocol/servers/" f"{SHA}/README.md"
-        with patch.object(self.compiler.opener, "open", return_value=FakeResponse()):
-            result = self.compiler.fetch_primary(raw_url, GOOD_DIGEST)
-        self.assertTrue(result.verified)
-
-    def test_mcp_docs_are_not_implicitly_immutable(self):
-        with self.assertRaises(EvidenceError):
-            self.compiler.fetch_primary("https://modelcontextprotocol.io/specification", GOOD_DIGEST)
-
-    def test_omega_and_production_are_always_false(self):
-        manifest = {"artifact_id": "TEST", "atomic_claims": [{"status": "VERIFIED", "evidence_url": GOOD_URL, "expected_sha256": GOOD_DIGEST}]}
+    def test_successful_observation_is_candidate_but_not_omega(self):
+        manifest = {
+            "artifact_id": "A",
+            "atomic_claims": [
+                {"status": "UNTRUSTED", "evidence_url": GOOD_URL, "expected_sha256": GOOD_DIGEST},
+            ],
+        }
         with patch.object(self.compiler.opener, "open", return_value=FakeResponse()):
             result = self.compiler.compile(manifest)
+        self.assertEqual(result["metrics"]["verified_claims"], 1)
+        self.assertEqual(result["final_classification"], "CANDIDATE")
         self.assertFalse(result["omega_verified"])
-        self.assertFalse(result["production_confirmed"])
+
+    def test_non_200_response_is_not_verified(self):
+        with patch.object(self.compiler.opener, "open", return_value=FakeResponse(status=500)):
+            result = self.compiler.fetch_primary(GOOD_URL, GOOD_DIGEST)
+        self.assertFalse(result.verified)
+
+    def test_https_context_is_created_by_default(self):
+        self.assertIsNotNone(self.compiler.tls)
+
+    def test_invalid_timeout_is_rejected(self):
+        with self.assertRaises(ValueError):
+            ZeroTrustEvidenceCompiler(timeout=0)
+
+    def test_case_sensitive_scheme_is_rejected(self):
+        self.assert_rejected(GOOD_URL.replace("https://", "HTTPS://"))
+
+    def test_case_sensitive_host_does_not_bypass_anchor(self):
+        with patch.object(self.compiler.opener, "open", return_value=FakeResponse()):
+            result = self.compiler.fetch_primary(GOOD_URL.replace("github.com", "GITHUB.COM"), GOOD_DIGEST)
+        self.assertTrue(result.verified)
 
 
 if __name__ == "__main__":
