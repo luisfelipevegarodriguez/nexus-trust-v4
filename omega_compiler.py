@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import hmac
+import ipaddress
 import json
 import re
+import socket
 import ssl
 import time
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
@@ -38,12 +40,12 @@ class _NoRedirectHandler(HTTPRedirectHandler):
 
 
 class ZeroTrustEvidenceCompiler:
-    VERSION = "4.4.1-zero-trust"
+    VERSION = "4.5.0-zero-trust"
+    # Only sources whose URL can itself carry an immutable Git commit reference
+    # are accepted as primary evidence by this compiler.
     ALLOWED_PRIMARY_HOSTS = frozenset({
         "github.com",
         "raw.githubusercontent.com",
-        "modelcontextprotocol.io",
-        "registry.modelcontextprotocol.io",
     })
     GITHUB_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
     SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -54,7 +56,7 @@ class ZeroTrustEvidenceCompiler:
     DEFAULT_TIMEOUT = 10.0
 
     def __init__(self, timeout: float = DEFAULT_TIMEOUT):
-        if not isinstance(timeout, (int, float)) or timeout <= 0:
+        if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
             raise ValueError("TIMEOUT_MUST_BE_POSITIVE")
         self.timeout = float(timeout)
         self.tls = ssl.create_default_context()
@@ -64,7 +66,8 @@ class ZeroTrustEvidenceCompiler:
         )
 
     @classmethod
-    def _parse_and_validate_url(cls, url: str) -> tuple[str, bool]:
+    def _parse_and_validate_url(cls, url: str) -> Tuple[str, bool]:
+        """Parse once with urlsplit and reject ambiguous/mutable references."""
         if not isinstance(url, str) or not url:
             raise EvidenceError("SOURCE_URL_REQUIRED")
         if len(url) > cls.MAX_URL_LENGTH:
@@ -78,6 +81,8 @@ class ZeroTrustEvidenceCompiler:
         except ValueError as exc:
             raise EvidenceError("URL_PARSE_ERROR") from exc
 
+        # urlsplit normalizes the scheme/hostname casing, but never trust
+        # netloc text directly. Reject userinfo, non-HTTPS, and non-default ports.
         if parsed.scheme != "https":
             raise EvidenceError("SOURCE_URL_MUST_BE_HTTPS")
         if parsed.username is not None or parsed.password is not None:
@@ -95,7 +100,7 @@ class ZeroTrustEvidenceCompiler:
             raise EvidenceError("SOURCE_HOST_NON_ASCII_FORBIDDEN") from exc
 
         host = parsed.hostname.lower()
-        if host not in cls.ALLOWED_PRIMARY_HOSTS:
+        if host.endswith(".") or host not in cls.ALLOWED_PRIMARY_HOSTS:
             raise EvidenceError("SOURCE_HOST_NOT_IN_TRUST_ANCHORS")
 
         raw_path = parsed.path
@@ -128,6 +133,26 @@ class ZeroTrustEvidenceCompiler:
 
         return host, immutable
 
+    @staticmethod
+    def _assert_public_dns(host: str) -> None:
+        """Reject obvious SSRF destinations before the HTTP connection."""
+        try:
+            infos = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+        except OSError as exc:
+            raise EvidenceError("DNS_RESOLUTION_FAILED") from exc
+
+        if not infos:
+            raise EvidenceError("DNS_NO_ADDRESSES")
+
+        for info in infos:
+            address = info[4][0]
+            try:
+                parsed_ip = ipaddress.ip_address(address)
+            except ValueError as exc:
+                raise EvidenceError("DNS_INVALID_ADDRESS") from exc
+            if not parsed_ip.is_global:
+                raise EvidenceError("DNS_NON_GLOBAL_ADDRESS_REJECTED")
+
     def fetch_primary(self, url: str, expected_sha256: str) -> Observation:
         host, immutable_reference = self._parse_and_validate_url(url)
         if not isinstance(expected_sha256, str) or not self.SHA256_RE.fullmatch(expected_sha256):
@@ -135,6 +160,7 @@ class ZeroTrustEvidenceCompiler:
         if not immutable_reference:
             raise EvidenceError("IMMUTABLE_SOURCE_REFERENCE_REQUIRED")
 
+        self._assert_public_dns(host)
         fetched_at_ns = time.time_ns()
         request = Request(
             url,
@@ -205,7 +231,7 @@ class ZeroTrustEvidenceCompiler:
             ),
         )
 
-    def compile(self, manifest: dict[str, Any]) -> dict[str, Any]:
+    def compile(self, manifest: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(manifest, dict):
             raise EvidenceError("MANIFEST_MUST_BE_OBJECT")
         artifact_id = manifest.get("artifact_id")
@@ -217,7 +243,7 @@ class ZeroTrustEvidenceCompiler:
         if len(claims) > self.MAX_CLAIMS:
             raise EvidenceError("TOO_MANY_CLAIMS")
 
-        observations: list[Observation] = []
+        observations: List[Observation] = []
         verified = 0
         for claim in claims:
             if not isinstance(claim, dict):
@@ -264,6 +290,8 @@ class ZeroTrustEvidenceCompiler:
                 "ECONOMIC_STATUS": "UNKNOWN",
                 "ADVANTAGE_STATUS": "UNVERIFIED",
             },
+            # Candidate means evidence was actually observed, not that CI,
+            # runtime, deployment, or production have been verified.
             "final_classification": "CANDIDATE" if density >= 0.90 else "RESEARCH",
             "omega_verified": False,
             "production_confirmed": False,
